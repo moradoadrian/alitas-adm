@@ -26,6 +26,7 @@ export type Pedido = {
   nota?: string;
   status?: 'nuevo'|'confirmado'|'preparando'|'listo'|'entregado'|'cancelado';
   createdAt?: any;
+  trackId?: string;
 };
 
 @Injectable({ providedIn: 'root' })
@@ -73,8 +74,49 @@ export class PedidoAdminService {
   }
 
   async actualizarStatus(idDoc: string, status: Pedido['status']) {
-    const { doc, updateDoc } = await import('@angular/fire/firestore');
-    const ref = doc(this.fs, 'pedidos', idDoc);
-    await runInInjectionContext(this.injector, () => updateDoc(ref, { status }));
+    const { doc, getDoc, updateDoc, setDoc, serverTimestamp } = await import('@angular/fire/firestore');
+  
+    // 1) Actualiza /pedidos/{idDoc}
+    const pedidoRef = doc(this.fs, 'pedidos', idDoc);
+    await runInInjectionContext(this.injector, () =>
+      updateDoc(pedidoRef, { status, updatedAt: serverTimestamp() })
+    );
+  
+    // 2) Lee el pedido para obtener trackId y demás campos mínimos
+    const snap = await runInInjectionContext(this.injector, () => getDoc(pedidoRef));
+    const p = snap.data() as Pedido | undefined;
+    const trackId = p?.trackId;
+  
+    if (!trackId) {
+      console.warn('[admin] Pedido sin trackId; no se puede reflejar en /seguimiento');
+      return;
+    }
+  
+    // 3) Refleja en /seguimiento/{trackId}
+    const segRef = doc(this.fs, 'seguimiento', trackId);
+    const segSnap = await runInInjectionContext(this.injector, () => getDoc(segRef));
+  
+    if (segSnap.exists()) {
+      // Solo update si ya existe (más barato)
+      await runInInjectionContext(this.injector, () =>
+        updateDoc(segRef, { status, updatedAt: serverTimestamp() })
+      );
+    } else {
+      // Si no existe, créalo con los campos mínimos que tus reglas aceptan
+      await runInInjectionContext(this.injector, () =>
+        setDoc(segRef, {
+          pedidoDocId: idDoc,
+          idFolio: p?.id ?? '',      // folio legible
+          status,
+          qty: p?.qty ?? 0,
+          total: p?.total ?? 0,
+          metodo: p?.metodo ?? 'pickup',
+          listoA: p?.listoA ?? null,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        }, { merge: true })
+      );
+    }
   }
+  
 }
